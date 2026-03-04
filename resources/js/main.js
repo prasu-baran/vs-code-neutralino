@@ -232,6 +232,7 @@ async function _renderFileTreeInner(treeEl) {
       if (state.expandedNodes.has(key)) state.expandedNodes.delete(key);
       else state.expandedNodes.add(key);
       renderFileTree();
+      saveSession();
     });
     header.addEventListener('contextmenu', e => {
       e.preventDefault();
@@ -304,6 +305,7 @@ async function buildTreeChildren(container, parentNode, depth) {
         if (state.expandedNodes.has(nodeKey)) state.expandedNodes.delete(nodeKey);
         else state.expandedNodes.add(nodeKey);
         renderFileTree();
+        saveSession();
       } else {
         await openFile(entryPath, entry.entry, entry.handle || null);
       }
@@ -1749,9 +1751,10 @@ function saveSession() {
   if (!isNL()) return;
   try {
     localStorage.setItem('cxSession', JSON.stringify({
-      folders: state.workspaceFolders.filter(f => f.path).map(f => ({ name: f.name, path: f.path })),
-      tabs:    state.openTabs.map(t => ({ path: t.path, name: t.name })),
-      active:  state.activeTabPath,
+      folders:  state.workspaceFolders.filter(f => f.path).map(f => ({ name: f.name, path: f.path })),
+      tabs:     state.openTabs.map(t => ({ path: t.path, name: t.name })),
+      active:   state.activeTabPath,
+      expanded: [...state.expandedNodes],
     }));
   } catch (_) {}
 }
@@ -1763,11 +1766,16 @@ async function restoreSession() {
     if (!raw) return;
     const session = JSON.parse(raw);
 
+    // Restore expanded node state first (before tree render)
+    for (const key of (session.expanded || [])) {
+      state.expandedNodes.add(key);
+    }
+
     // Restore workspace folders
     for (const f of (session.folders || [])) {
       if (!state.workspaceFolders.find(w => w.path === f.path)) {
         state.workspaceFolders.push(f);
-        state.expandedNodes.add(f.path);
+        state.expandedNodes.add(f.path);  // ensure root is always expanded
         document.getElementById('statusBranch').textContent = f.name;
       }
     }
