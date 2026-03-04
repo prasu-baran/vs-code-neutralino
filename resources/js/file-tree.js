@@ -23,6 +23,7 @@ async function addWorkspaceFolder() {
     state.expandedNodes.add(folder.path || folder.name);
     await renderFileTree();
     startPolling();
+    updateGitStatus(folder.path);
     document.getElementById('statusBranch').textContent = folder.name;
     saveSession();
   } catch (err) {

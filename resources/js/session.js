@@ -42,6 +42,7 @@ async function restoreSession() {
     if (state.workspaceFolders.length) {
       await renderFileTree();
       startPolling();
+      updateGitStatus(state.workspaceFolders[0]?.path);
     }
 
     // Reopen tabs (silently skip deleted files)

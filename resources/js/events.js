@@ -27,6 +27,7 @@ function _bindThemeEvents() {
 
 function _bindSidebarEvents() {
   document.getElementById('addFolderBtn').addEventListener('click', addWorkspaceFolder);
+  document.getElementById('openFolderEmptyBtn').addEventListener('click', addWorkspaceFolder);
   document.getElementById('newFileBtn').addEventListener('click', newFileInRoot);
   document.getElementById('refreshTreeBtn').addEventListener('click', renderFileTree);
   document.getElementById('welcomeOpenFolder').addEventListener('click', addWorkspaceFolder);

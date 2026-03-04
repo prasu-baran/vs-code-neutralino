@@ -186,6 +186,7 @@ async function searchInFiles(query) {
         row.addEventListener('click', async () => {
           await openFile(fp, fileName);
           setTimeout(() => {
+            if (!editor) return;
             editor.setCursor({ line: hit.lineNum - 1, ch: 0 });
             editor.scrollIntoView({ line: hit.lineNum - 1, ch: 0 }, 80);
             editor.focus();

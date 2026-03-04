@@ -168,7 +168,7 @@ function clearAiChat() {
 // ── Quick-actions (Explain / Fix / Refactor) ──────────────────────────────────
 
 function aiQuickAction(type) {
-  if (!editor) return;
+  if (!editor || !state.activeTabPath) return;
   const selection = editor.getSelection();
   const ext       = getExt(state.activeTabPath || '');
 

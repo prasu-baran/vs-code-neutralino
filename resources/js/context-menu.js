@@ -11,15 +11,16 @@ function showContextMenu(x, y, isDir) {
   menu.style.display = 'block';
 
   const vw = window.innerWidth, vh = window.innerHeight;
-  const mw = 185, mh = isWorkspace ? 90 : 220;
+  const mw = 185, mh = isWorkspace ? 110 : 255;
   menu.style.left = Math.min(x, vw - mw) + 'px';
   menu.style.top  = Math.min(y, vh - mh) + 'px';
 
   document.getElementById('ctxRemoveFolder').style.display  = isWorkspace ? 'flex'  : 'none';
   document.getElementById('ctxRemoveSep').style.display     = isWorkspace ? 'block' : 'none';
   document.getElementById('ctxOpen').style.display         = isWorkspace || isDir ? 'none' : 'flex';
-  // "Open in Explorer" is available for all target types
+  // "Open in Explorer" and "Copy Path" are available for all target types
   document.getElementById('ctxOpenInExplorer').style.display = 'flex';
+  document.getElementById('ctxCopyPath').style.display       = 'flex';
 
   ['ctxNewFile', 'ctxNewFolder', 'ctxRename', 'ctxDelete'].forEach(id => {
     const el = document.getElementById(id);
