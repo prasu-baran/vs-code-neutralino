@@ -10,6 +10,8 @@
   <!-- CodeMirror themes -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/one-dark.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/eclipse.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body class="theme-dark">
@@ -33,26 +35,43 @@
     <!-- Activity Bar (far left strip) -->
     <div class="activity-bar">
       <button class="activity-btn active" data-panel="explorer" title="Explorer">EX</button>
-      <button class="activity-btn" data-panel="search" title="Search (coming soon)">SR</button>
+      <button class="activity-btn" data-panel="search" title="Search in Files (Ctrl+Shift+F)">SR</button>
     </div>
 
     <!-- ── LEFT SIDEBAR ── -->
     <div class="sidebar" id="sidebar">
-      <div class="sidebar-header">
-        <span class="sidebar-section-title">EXPLORER</span>
-        <div class="sidebar-header-btns">
-          <button id="addFolderBtn" class="tb-btn" title="Open Folder">+Folder</button>
-          <button id="newFileBtn"   class="tb-btn" title="New File">+File</button>
-          <button id="refreshTreeBtn" class="tb-btn" title="Refresh Tree">↺</button>
+
+      <!-- Explorer panel -->
+      <div id="explorerPanel" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
+        <div class="sidebar-header">
+          <span class="sidebar-section-title">EXPLORER</span>
+          <div class="sidebar-header-btns">
+            <button id="addFolderBtn" class="tb-btn" title="Open Folder">+Folder</button>
+            <button id="newFileBtn"   class="tb-btn" title="New File">+File</button>
+            <button id="refreshTreeBtn" class="tb-btn" title="Refresh Tree">↺</button>
+          </div>
+        </div>
+        <div id="fileTree" class="file-tree">
+          <div class="no-folder-msg">
+            <p>No folder opened</p>
+            <button id="openFolderEmptyBtn" class="btn-primary">Open Folder</button>
+          </div>
         </div>
       </div>
 
-      <div id="fileTree" class="file-tree">
-        <div class="no-folder-msg">
-          <p>No folder opened</p>
-          <button id="openFolderEmptyBtn" class="btn-primary">Open Folder</button>
+      <!-- Search-in-files panel -->
+      <div id="searchPanel" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+        <div class="sidebar-header">
+          <span class="sidebar-section-title">SEARCH</span>
+        </div>
+        <div class="search-panel-body">
+          <div class="search-input-row">
+            <input type="text" id="searchFilesInput" class="search-files-input" placeholder="Search in files…">
+          </div>
+          <div id="searchResults" class="search-results"></div>
         </div>
       </div>
+
     </div>
 
     <!-- Sidebar resize handle -->
@@ -65,10 +84,32 @@
       <div class="tabs-bar" id="tabsBar">
         <div class="tabs-list" id="tabsList"></div>
         <div class="tabs-bar-actions">
+          <button id="wordWrapBtn" class="tb-btn" title="Toggle Word Wrap (Alt+Z)">Wrap</button>
+          <button id="zoomOutBtn"  class="tb-btn" title="Zoom Out (Ctrl+-)">A−</button>
+          <button id="zoomInBtn"   class="tb-btn" title="Zoom In (Ctrl+=)">A+</button>
           <button id="saveFileBtn" class="tb-btn" title="Save (Ctrl+S)">Save</button>
           <button id="runFileBtn"  class="tb-btn run-btn" title="Run File (Ctrl+Enter)">&#9654; Run</button>
         </div>
       </div>
+
+      <!-- Find / Replace bar -->
+      <div class="find-bar" id="findBar" style="display:none">
+        <div class="find-bar-row">
+          <input type="text" id="findInput" class="find-input" placeholder="Find…">
+          <span id="findCount" class="find-count"></span>
+          <button class="find-nav-btn" id="findPrevBtn" title="Previous (Shift+F3)">↑</button>
+          <button class="find-nav-btn" id="findNextBtn" title="Next (F3)">↓</button>
+          <button class="find-close-btn" id="closeFindBtn" title="Close (Escape)">✕</button>
+        </div>
+        <div class="find-bar-row">
+          <input type="text" id="replaceInput" class="find-input" placeholder="Replace…">
+          <button class="find-action-btn" id="replaceOneBtn">Replace</button>
+          <button class="find-action-btn" id="replaceAllBtn">Replace All</button>
+        </div>
+      </div>
+
+      <!-- Breadcrumb bar -->
+      <div class="breadcrumb-bar" id="breadcrumbBar"></div>
 
       <!-- Code editor wrapper -->
       <div class="code-editor-wrap" id="codeEditorWrap">
@@ -89,6 +130,11 @@
         </div>
         <!-- CodeMirror will replace this textarea -->
         <textarea id="codeTextarea"></textarea>
+        <!-- Image preview -->
+        <div class="image-preview" id="imagePreview" style="display:none">
+          <img id="previewImg" src="" alt="Preview">
+          <div class="image-info" id="imageInfo"></div>
+        </div>
       </div>
 
       <!-- Terminal panel -->
@@ -148,6 +194,13 @@
 
       <!-- Prompt input area -->
       <div class="ai-input-section">
+        <!-- Quick-action buttons: work on editor selection, or whole file if no selection -->
+        <div class="ai-quick-row">
+          <span class="ai-quick-label">Quick:</span>
+          <button class="btn-sm-secondary ai-quick-btn" id="aiExplainBtn"  title="Explain selection or file">Explain</button>
+          <button class="btn-sm-secondary ai-quick-btn" id="aiFixBtn"      title="Find &amp; fix bugs">Fix</button>
+          <button class="btn-sm-secondary ai-quick-btn" id="aiRefactorBtn" title="Refactor code">Refactor</button>
+        </div>
         <textarea
           id="aiPromptInput"
           class="ai-prompt-textarea"
@@ -182,6 +235,8 @@
 
   <!-- ═══════════════════════ CONTEXT MENU ═══════════════════════ -->
   <div id="contextMenu" class="context-menu">
+    <button class="ctx-item" id="ctxRemoveFolder" style="display:none">Remove Folder</button>
+    <div class="ctx-separator" id="ctxRemoveSep" style="display:none"></div>
     <button class="ctx-item" id="ctxOpen">Open / Edit</button>
     <div class="ctx-separator"></div>
     <button class="ctx-item" id="ctxNewFile">New File Here</button>
@@ -225,6 +280,15 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/selection/active-line.min.js"></script>
+  <!-- CodeMirror search / fold / hint addons -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/searchcursor.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldcode.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/brace-fold.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/indent-fold.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/comment-fold.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/anyword-hint.min.js"></script>
   <!-- Neutralino + App -->
   <script src="js/neutralino.js"></script>
   <script src="js/main.js"></script>
