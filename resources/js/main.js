@@ -29,11 +29,24 @@ const state = {
   // Polling
   pollingTimer:      null,
   pollingSnapshot:   null,
+
+  // Terminal history
+  terminalHistory:      [],
+  terminalHistoryIndex: -1,
+
+  // Editor settings (persisted)
+  editorFontSize: parseInt(localStorage.getItem('cxFontSize'), 10) || 14,
+  wordWrap:       localStorage.getItem('cxWordWrap') === 'true',
 };
 
 // CodeMirror instance
 let editor = null;
 let editorBusy = false;   // guard to avoid recursive change events
+
+// Find / Replace state
+let findMarks   = [];
+let findMatches = [];
+let findIndex   = -1;
 
 // ============================================================================
 //  BOOTSTRAP
@@ -51,7 +64,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   terminalPrint('info', 'CodeXplorer ready. Open a folder to get started.');
-  terminalPrint('info', 'Ctrl+S  Save   |   Ctrl+Enter  Run   |   Ctrl+`  Toggle terminal');
+  terminalPrint('info', 'Ctrl+S  Save   |   Ctrl+Enter  Run   |   Ctrl+`  Terminal   |   Ctrl+F  Find');
+  restoreSession();
 });
 
 // ============================================================================
@@ -109,14 +123,33 @@ function initCodeMirror() {
     matchBrackets:    true,
     autoCloseBrackets:true,
     styleActiveLine:  true,
-    lineWrapping:     false,
+    lineWrapping:     state.wordWrap,
     tabSize:          2,
     indentWithTabs:   false,
     mode:             'text/plain',
+    foldGutter:       true,
+    gutters:          ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
     extraKeys: {
       'Ctrl-S':     () => saveCurrentFile(),
       'Ctrl-Enter': () => runCurrentFile(),
+      'Ctrl-F':     () => openFindBar(false),
+      'Ctrl-H':     () => openFindBar(true),
+      'F3':         () => findNext(),
+      'Shift-F3':   () => findPrev(),
+      'Ctrl-Space': cm => CodeMirror.showHint(cm, CodeMirror.hint.anyword),
+      'Alt-Z':      () => toggleWordWrap(),
+      'Escape':     () => {
+        if (document.getElementById('findBar').style.display !== 'none') closeFindBar();
+      },
     },
+  });
+
+  // Apply saved font size
+  requestAnimationFrame(() => {
+    const cm = document.querySelector('.CodeMirror');
+    if (cm && state.editorFontSize !== 14) cm.style.fontSize = state.editorFontSize + 'px';
+    const wwBtn = document.getElementById('wordWrapBtn');
+    if (wwBtn) wwBtn.classList.toggle('active-btn', state.wordWrap);
   });
 
   editor.on('change', () => {
@@ -156,6 +189,7 @@ async function addWorkspaceFolder() {
     await renderFileTree();
     startPolling();
     document.getElementById('statusBranch').textContent = folder.name;
+    saveSession();
   } catch (err) {
     if (err.name !== 'AbortError') terminalPrint('stderr', 'Open folder failed: ' + err.message);
   }
@@ -203,6 +237,12 @@ async function _renderFileTreeInner(treeEl) {
       if (state.expandedNodes.has(key)) state.expandedNodes.delete(key);
       else state.expandedNodes.add(key);
       renderFileTree();
+      saveSession();
+    });
+    header.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      state.ctxTarget = { path: folder.path, type: 'workspace', name: folder.name };
+      showContextMenu(e.clientX, e.clientY, true);
     });
     wsDiv.appendChild(header);
 
@@ -270,6 +310,7 @@ async function buildTreeChildren(container, parentNode, depth) {
         if (state.expandedNodes.has(nodeKey)) state.expandedNodes.delete(nodeKey);
         else state.expandedNodes.add(nodeKey);
         renderFileTree();
+        saveSession();
       } else {
         await openFile(entryPath, entry.entry, entry.handle || null);
       }
@@ -320,8 +361,17 @@ async function openFile(filePath, fileName, handle = null) {
   const ext = (fileName.split('.').pop() || '').toLowerCase();
 
   if (VIDEO_EXTS.has(ext))  { playVideo(filePath, fileName); return; }
-  if (IMAGE_EXTS.has(ext) || BINARY_EXTS.has(ext)) {
-    terminalPrint('info', `Binary/image file — cannot display in editor: ${fileName}`);
+  if (IMAGE_EXTS.has(ext)) {
+    if (!state.openTabs.find(t => t.path === filePath)) {
+      state.openTabs.push({ path: filePath, name: fileName, modified: false });
+    }
+    setActiveTab(filePath);
+    showImagePreview(filePath, fileName);
+    saveSession();
+    return;
+  }
+  if (BINARY_EXTS.has(ext)) {
+    terminalPrint('info', `Binary file — cannot display in editor: ${fileName}`);
     return;
   }
 
@@ -349,12 +399,21 @@ async function openFile(filePath, fileName, handle = null) {
   }
 
   loadEditorContent(filePath, fileName);
+  saveSession();
 }
 
 function loadEditorContent(filePath, fileName) {
-  const ext     = (fileName.split('.').pop() || '').toLowerCase();
-  const content = state.fileContents.get(filePath) || '';
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
 
+  // Image files: show preview instead of code editor
+  if (IMAGE_EXTS.has(ext)) {
+    showImagePreview(filePath, fileName);
+    return;
+  }
+
+  hideImagePreview();
+
+  const content = state.fileContents.get(filePath) || '';
   editorBusy = true;
   editor.setValue(content);
   editor.setOption('mode', cmMode(ext));
@@ -408,6 +467,7 @@ function setActiveTab(filePath) {
   document.querySelectorAll('.tree-node').forEach(n => {
     n.classList.toggle('active', n.dataset.path === filePath);
   });
+  updateBreadcrumbs(filePath);
 }
 
 function renderTabs() {
@@ -451,12 +511,15 @@ function closeTab(filePath) {
       editorBusy = true;
       editor.setValue('');
       editorBusy = false;
+      hideImagePreview();
       document.getElementById('welcomeScreen').classList.remove('hidden');
       document.getElementById('titleFilePath').textContent = '';
       document.getElementById('statusLang').textContent    = 'Plain Text';
+      updateBreadcrumbs(null);
     }
   }
   renderTabs();
+  saveSession();
 }
 
 function markTabModified(filePath, modified) {
@@ -978,13 +1041,25 @@ function clearAiChat() {
 
 function showContextMenu(x, y, isDir) {
   const menu = document.getElementById('contextMenu');
+  const isWorkspace = state.ctxTarget?.type === 'workspace';
   menu.style.display = 'block';
   // Clamp to viewport
   const vw = window.innerWidth, vh = window.innerHeight;
-  const mw = 185, mh = 200;
+  const mw = 185, mh = isWorkspace ? 60 : 200;
   menu.style.left = Math.min(x, vw - mw) + 'px';
   menu.style.top  = Math.min(y, vh - mh) + 'px';
-  document.getElementById('ctxOpen').style.display = isDir ? 'none' : 'flex';
+  document.getElementById('ctxRemoveFolder').style.display = isWorkspace ? 'flex' : 'none';
+  document.getElementById('ctxRemoveSep').style.display    = isWorkspace ? 'block' : 'none';
+  document.getElementById('ctxOpen').style.display        = isWorkspace || isDir ? 'none' : 'flex';
+  // Hide file/folder actions when right-clicking workspace root
+  ['ctxNewFile','ctxNewFolder','ctxRename','ctxDelete'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = isWorkspace ? 'none' : '';
+  });
+  // Hide separators when workspace
+  menu.querySelectorAll('.ctx-separator:not(#ctxRemoveSep)').forEach(sep => {
+    sep.style.display = isWorkspace ? 'none' : '';
+  });
 }
 
 function hideContextMenu() {
@@ -1078,6 +1153,40 @@ async function deleteRecursive(dirPath, sep) {
     else await Neutralino.filesystem.remove(fp);
   }
   await Neutralino.filesystem.remove(dirPath);
+}
+
+function removeWorkspaceFolder() {
+  const target = state.ctxTarget;
+  hideContextMenu();
+  if (!target || target.type !== 'workspace') return;
+
+  const prefix = target.path;
+  const sep = prefix.includes('\\') ? '\\' : '/';
+
+  // Close all tabs belonging to this folder
+  state.openTabs = state.openTabs.filter(t => {
+    if (t.path && (t.path === prefix || t.path.startsWith(prefix + sep))) {
+      state.fileContents.delete(t.path);
+      return false;
+    }
+    return true;
+  });
+
+  // If active tab was in removed folder, reset editor
+  if (state.activeTabPath && (state.activeTabPath === prefix || state.activeTabPath.startsWith(prefix + sep))) {
+    state.activeTabPath = null;
+    editorBusy = true; editor.setValue(''); editorBusy = false;
+    hideImagePreview();
+    updateBreadcrumbs(null);
+    document.getElementById('titleFilePath').textContent = '';
+    document.getElementById('welcomeScreen').classList.remove('hidden');
+  }
+
+  state.workspaceFolders = state.workspaceFolders.filter(f => f.path !== prefix);
+  renderTabs();
+  renderFileTree();
+  saveSession();
+  setStatus('Folder removed from workspace');
 }
 
 async function ctxNewFile() {
@@ -1213,9 +1322,23 @@ function bindAllEvents() {
   document.getElementById('toggleTermBtn').addEventListener('click', toggleTerminal);
   document.getElementById('terminalInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') {
-      const cmd = e.target.value;
+      const cmd = e.target.value.trim();
       e.target.value = '';
+      if (cmd) {
+        state.terminalHistory.push(cmd);
+        state.terminalHistoryIndex = state.terminalHistory.length;
+      }
       runTerminalCommand(cmd);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!state.terminalHistory.length) return;
+      state.terminalHistoryIndex = Math.max(0, state.terminalHistoryIndex - 1);
+      e.target.value = state.terminalHistory[state.terminalHistoryIndex] || '';
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      state.terminalHistoryIndex = Math.min(state.terminalHistory.length, state.terminalHistoryIndex + 1);
+      e.target.value = state.terminalHistoryIndex < state.terminalHistory.length
+        ? state.terminalHistory[state.terminalHistoryIndex] : '';
     }
   });
 
@@ -1250,6 +1373,7 @@ function bindAllEvents() {
   });
 
   // Context menu
+  document.getElementById('ctxRemoveFolder').addEventListener('click', removeWorkspaceFolder);
   document.getElementById('ctxOpen').addEventListener('click', async () => {
     await ctxOpenFile(); hideContextMenu();
   });
@@ -1275,19 +1399,82 @@ function bindAllEvents() {
     if (e.target.id === 'videoModal') closeVideoPlayer();
   });
 
-  // Activity bar (visual only for now)
+  // Activity bar: switch between Explorer and Search panels
   document.querySelectorAll('.activity-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.activity-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
+      const panel = btn.dataset.panel;
+      const explorerEl = document.getElementById('explorerPanel');
+      const searchEl   = document.getElementById('searchPanel');
+      if (panel === 'explorer') {
+        explorerEl.style.display = 'flex';
+        searchEl.style.display   = 'none';
+      } else if (panel === 'search') {
+        explorerEl.style.display = 'none';
+        searchEl.style.display   = 'flex';
+        setTimeout(() => document.getElementById('searchFilesInput').focus(), 50);
+      }
     });
   });
+
+  // Search in files
+  let _searchDebounce = null;
+  document.getElementById('searchFilesInput').addEventListener('input', e => {
+    clearTimeout(_searchDebounce);
+    _searchDebounce = setTimeout(() => searchInFiles(e.target.value), 400);
+  });
+  document.getElementById('searchFilesInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { clearTimeout(_searchDebounce); searchInFiles(e.target.value); }
+  });
+
+  // Word wrap + zoom
+  document.getElementById('wordWrapBtn').addEventListener('click', toggleWordWrap);
+  document.getElementById('zoomInBtn').addEventListener('click',  () => setEditorFontSize(+2));
+  document.getElementById('zoomOutBtn').addEventListener('click', () => setEditorFontSize(-2));
+
+  // Find / Replace bar
+  document.getElementById('findPrevBtn').addEventListener('click',    findPrev);
+  document.getElementById('findNextBtn').addEventListener('click',    findNext);
+  document.getElementById('replaceOneBtn').addEventListener('click',  replaceOne);
+  document.getElementById('replaceAllBtn').addEventListener('click',  replaceAll);
+  document.getElementById('closeFindBtn').addEventListener('click',   closeFindBar);
+  document.getElementById('findInput').addEventListener('input',      performFind);
+  document.getElementById('findInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter')  { e.shiftKey ? findPrev() : findNext(); }
+    if (e.key === 'Escape') { closeFindBar(); }
+  });
+  document.getElementById('replaceInput').addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeFindBar();
+  });
+
+  // AI quick-actions
+  document.getElementById('aiExplainBtn').addEventListener('click',  () => aiQuickAction('explain'));
+  document.getElementById('aiFixBtn').addEventListener('click',      () => aiQuickAction('fix'));
+  document.getElementById('aiRefactorBtn').addEventListener('click', () => aiQuickAction('refactor'));
 
   // Global keyboard shortcuts
   document.addEventListener('keydown', e => {
     if (e.ctrlKey && e.key === 's')  { e.preventDefault(); saveCurrentFile(); }
     if (e.ctrlKey && e.key === '`')  { e.preventDefault(); toggleTerminal(); }
-    if (e.key === 'Escape')            { hideContextMenu(); }
+    // Find/Replace (only when editor doesn't already handle it)
+    if (e.ctrlKey && e.key === 'f' && !editor?.hasFocus()) { e.preventDefault(); openFindBar(false); }
+    if (e.ctrlKey && e.key === 'h' && !editor?.hasFocus()) { e.preventDefault(); openFindBar(true); }
+    // Ctrl+Shift+F → switch to Search panel
+    if (e.ctrlKey && e.shiftKey && e.key === 'F') {
+      e.preventDefault();
+      document.querySelector('.activity-btn[data-panel="search"]')?.click();
+    }
+    // F3 / Shift+F3 — navigate find results
+    if (e.key === 'F3' && !e.ctrlKey) { e.preventDefault(); e.shiftKey ? findPrev() : findNext(); }
+    // Font zoom
+    if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); setEditorFontSize(+2); }
+    if (e.ctrlKey && e.key === '-')  { e.preventDefault(); setEditorFontSize(-2); }
+    if (e.ctrlKey && e.key === '0')  { e.preventDefault(); setEditorFontSize(14 - state.editorFontSize); }
+    if (e.key === 'Escape') {
+      hideContextMenu();
+      if (document.getElementById('findBar').style.display !== 'none') closeFindBar();
+    }
   });
 
   // Sidebar resize drag
@@ -1331,4 +1518,366 @@ function setupResizeDrag(handle, target, prop, min, max, inverted = false) {
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup',   onUp);
   });
+}
+
+// ============================================================================
+//  FIND / REPLACE
+// ============================================================================
+
+function openFindBar(showReplace = false) {
+  const bar = document.getElementById('findBar');
+  bar.style.display = 'flex';
+  const findInput = document.getElementById('findInput');
+  // Pre-fill with current selection if it's a single line
+  if (editor) {
+    const sel = editor.getSelection();
+    if (sel && !sel.includes('\n')) findInput.value = sel;
+  }
+  findInput.focus();
+  findInput.select();
+  if (showReplace) document.getElementById('replaceInput').focus();
+  performFind();
+}
+
+function closeFindBar() {
+  document.getElementById('findBar').style.display = 'none';
+  clearFindMarks();
+  findMatches = [];
+  findIndex   = -1;
+  document.getElementById('findCount').textContent = '';
+  document.getElementById('findInput').classList.remove('find-no-match');
+  editor && editor.focus();
+}
+
+function clearFindMarks() {
+  findMarks.forEach(m => m.clear());
+  findMarks = [];
+}
+
+function performFind() {
+  clearFindMarks();
+  findMatches = [];
+  findIndex   = -1;
+
+  const query     = document.getElementById('findInput').value;
+  const findInput = document.getElementById('findInput');
+
+  if (!query || !editor) {
+    document.getElementById('findCount').textContent = '';
+    findInput.classList.remove('find-no-match');
+    return;
+  }
+
+  // Collect all matches
+  const cursor = editor.getSearchCursor(query, { line: 0, ch: 0 }, { caseFold: true });
+  while (cursor.findNext()) {
+    const from = cursor.from();
+    const to   = cursor.to();
+    findMatches.push({ from, to });
+    findMarks.push(editor.markText(from, to, { className: 'cm-find-match' }));
+  }
+
+  if (findMatches.length === 0) {
+    document.getElementById('findCount').textContent = 'No matches';
+    findInput.classList.add('find-no-match');
+    return;
+  }
+
+  findInput.classList.remove('find-no-match');
+  findJumpTo(0);
+}
+
+function findJumpTo(idx) {
+  if (!findMatches.length) return;
+  findIndex = ((idx % findMatches.length) + findMatches.length) % findMatches.length;
+
+  // Re-apply marks: active vs normal
+  findMarks.forEach((mark, i) => {
+    const pos = mark.find();
+    if (!pos) return;
+    mark.clear();
+    findMarks[i] = editor.markText(pos.from, pos.to, {
+      className: i === findIndex ? 'cm-find-active' : 'cm-find-match',
+    });
+  });
+
+  const m = findMatches[findIndex];
+  editor.scrollIntoView({ from: m.from, to: m.to }, 80);
+  editor.setCursor(m.to);
+  document.getElementById('findCount').textContent = `${findIndex + 1} / ${findMatches.length}`;
+}
+
+function findNext() {
+  if (findMatches.length === 0) { performFind(); return; }
+  findJumpTo(findIndex + 1);
+}
+
+function findPrev() {
+  if (findMatches.length === 0) { performFind(); return; }
+  findJumpTo(findIndex - 1);
+}
+
+function replaceOne() {
+  if (!findMatches.length || findIndex < 0) return;
+  const replacement = document.getElementById('replaceInput').value;
+  const m = findMatches[findIndex];
+  editor.replaceRange(replacement, m.from, m.to);
+  performFind();
+}
+
+function replaceAll() {
+  const query = document.getElementById('findInput').value;
+  const replacement = document.getElementById('replaceInput').value;
+  if (!query || !editor) return;
+
+  let count = 0;
+  editor.operation(() => {
+    const cursor = editor.getSearchCursor(query, { line: 0, ch: 0 }, { caseFold: true });
+    while (cursor.findNext()) { cursor.replace(replacement); count++; }
+  });
+
+  performFind();
+  if (count) terminalPrint('info', `Replaced ${count} occurrence${count !== 1 ? 's' : ''}.`);
+}
+
+// ============================================================================
+//  SEARCH IN FILES
+// ============================================================================
+
+async function searchInFiles(query) {
+  const resultsEl = document.getElementById('searchResults');
+  if (!query.trim()) { resultsEl.innerHTML = ''; return; }
+
+  if (!isNL() || !state.workspaceFolders.length) {
+    resultsEl.innerHTML = '<div class="search-no-results">Open a folder to search in files.</div>';
+    return;
+  }
+
+  resultsEl.innerHTML = '<div class="search-no-results">Searching…</div>';
+
+  const folder = state.workspaceFolders[0];
+  if (!folder?.path) return;
+
+  // PowerShell Select-String: robust recursive search, outputs path|||line|||content
+  const qPS = query.replace(/'/g, "''");
+  const fPS = folder.path.replace(/'/g, "''");
+  const cmd = `powershell -NoProfile -Command "` +
+    `Get-ChildItem -Path '${fPS}' -Recurse -File -ErrorAction SilentlyContinue | ` +
+    `Select-String -Pattern '${qPS}' -SimpleMatch -ErrorAction SilentlyContinue | ` +
+    `Select-Object -First 200 | ` +
+    `ForEach-Object { ('{0}|||{1}|||{2}' -f $_.Path, $_.LineNumber, $_.Line.Trim()) }" 2>&1`;
+
+  try {
+    const r     = await Neutralino.os.execCommand(cmd);
+    const lines = (r.stdOut || '').trim().split('\n').filter(l => l.includes('|||'));
+
+    if (!lines.length) {
+      resultsEl.innerHTML = '<div class="search-no-results">No results found.</div>';
+      return;
+    }
+
+    // Group hits by file
+    const byFile = new Map();
+    for (const line of lines) {
+      const sep   = line.indexOf('|||');
+      const sep2  = line.indexOf('|||', sep + 3);
+      if (sep < 0 || sep2 < 0) continue;
+      const fp      = line.slice(0, sep).trim();
+      const lineNum = parseInt(line.slice(sep + 3, sep2), 10);
+      const content = line.slice(sep2 + 3);
+      if (!byFile.has(fp)) byFile.set(fp, []);
+      byFile.get(fp).push({ lineNum, content });
+    }
+
+    resultsEl.innerHTML = '';
+    for (const [fp, hits] of byFile) {
+      const fileName  = fp.split(/[\\/]/).pop();
+      const fileGroup = document.createElement('div');
+      fileGroup.className = 'search-file-group';
+
+      const fileHeader = document.createElement('div');
+      fileHeader.className = 'search-file-header';
+      fileHeader.textContent = `${fileName}  (${hits.length})`;
+      fileHeader.title = fp;
+      fileGroup.appendChild(fileHeader);
+
+      for (const hit of hits) {
+        const row = document.createElement('div');
+        row.className = 'search-result-row';
+        row.innerHTML =
+          `<span class="search-line-num">${hit.lineNum}</span>` +
+          `<span class="search-line-content">${escHtml(hit.content.slice(0, 120))}</span>`;
+        row.addEventListener('click', async () => {
+          await openFile(fp, fileName);
+          setTimeout(() => {
+            editor.setCursor({ line: hit.lineNum - 1, ch: 0 });
+            editor.scrollIntoView({ line: hit.lineNum - 1, ch: 0 }, 80);
+            editor.focus();
+          }, 150);
+        });
+        fileGroup.appendChild(row);
+      }
+      resultsEl.appendChild(fileGroup);
+    }
+  } catch (err) {
+    resultsEl.innerHTML = `<div class="search-no-results">Search error: ${escHtml(err.message.slice(0, 120))}</div>`;
+  }
+}
+
+// ============================================================================
+//  FONT ZOOM
+// ============================================================================
+
+function setEditorFontSize(delta) {
+  state.editorFontSize = Math.max(10, Math.min(32, state.editorFontSize + delta));
+  const cm = document.querySelector('.CodeMirror');
+  if (cm) cm.style.fontSize = state.editorFontSize + 'px';
+  editor && editor.refresh();
+  localStorage.setItem('cxFontSize', state.editorFontSize);
+  setStatus(`Font: ${state.editorFontSize}px`);
+}
+
+// ============================================================================
+//  WORD WRAP TOGGLE
+// ============================================================================
+
+function toggleWordWrap() {
+  state.wordWrap = !state.wordWrap;
+  editor && editor.setOption('lineWrapping', state.wordWrap);
+  document.getElementById('wordWrapBtn').classList.toggle('active-btn', state.wordWrap);
+  localStorage.setItem('cxWordWrap', state.wordWrap);
+  setStatus('Word wrap ' + (state.wordWrap ? 'on' : 'off'));
+}
+
+// ============================================================================
+//  SESSION SAVE / RESTORE
+// ============================================================================
+
+function saveSession() {
+  if (!isNL()) return;
+  try {
+    localStorage.setItem('cxSession', JSON.stringify({
+      folders:  state.workspaceFolders.filter(f => f.path).map(f => ({ name: f.name, path: f.path })),
+      tabs:     state.openTabs.map(t => ({ path: t.path, name: t.name })),
+      active:   state.activeTabPath,
+      expanded: [...state.expandedNodes],
+    }));
+  } catch (_) {}
+}
+
+async function restoreSession() {
+  if (!isNL()) return;
+  try {
+    const raw = localStorage.getItem('cxSession');
+    if (!raw) return;
+    const session = JSON.parse(raw);
+
+    // Restore expanded node state first (before tree render)
+    for (const key of (session.expanded || [])) {
+      state.expandedNodes.add(key);
+    }
+
+    // Restore workspace folders
+    for (const f of (session.folders || [])) {
+      if (!state.workspaceFolders.find(w => w.path === f.path)) {
+        state.workspaceFolders.push(f);
+        state.expandedNodes.add(f.path);  // ensure root is always expanded
+        document.getElementById('statusBranch').textContent = f.name;
+      }
+    }
+    if (state.workspaceFolders.length) {
+      await renderFileTree();
+      startPolling();
+    }
+
+    // Restore open tabs
+    for (const tab of (session.tabs || [])) {
+      try { await openFile(tab.path, tab.name); } catch (_) {}
+    }
+
+    // Restore active tab
+    const active = session.active;
+    if (active) {
+      const t = state.openTabs.find(t => t.path === active);
+      if (t) { setActiveTab(t.path); loadEditorContent(t.path, t.name); }
+    }
+  } catch (_) {}
+}
+
+// ============================================================================
+//  IMAGE PREVIEW
+// ============================================================================
+
+function showImagePreview(filePath, fileName) {
+  document.getElementById('welcomeScreen').classList.add('hidden');
+  const cm = document.querySelector('.CodeMirror');
+  if (cm) cm.style.display = 'none';
+  const preview = document.getElementById('imagePreview');
+  preview.style.display = 'flex';
+  document.getElementById('previewImg').src = `file:///${filePath.replace(/\\/g, '/')}`;
+  document.getElementById('imageInfo').textContent = fileName;
+}
+
+function hideImagePreview() {
+  const preview = document.getElementById('imagePreview');
+  if (preview) preview.style.display = 'none';
+  const cm = document.querySelector('.CodeMirror');
+  if (cm) cm.style.display = '';
+  editor && editor.refresh();
+}
+
+// ============================================================================
+//  AI QUICK-ACTIONS
+// ============================================================================
+
+function aiQuickAction(type) {
+  if (!editor) return;
+  const selection = editor.getSelection();
+  const ext = state.activeTabPath
+    ? (state.activeTabPath.split('.').pop() || '').toLowerCase()
+    : '';
+
+  const target = selection && !selection.includes('\n') === false
+    ? selection  // multi-line selection
+    : selection || null;
+
+  const codeRef = target
+    ? `the selected code:\n\`\`\`${ext}\n${target}\n\`\`\``
+    : `the current file:\n\`\`\`${ext}\n${editor.getValue()}\n\`\`\``;
+
+  const prompts = {
+    explain:  `Explain ${codeRef}`,
+    fix:      `Find and fix any bugs or issues in ${codeRef}`,
+    refactor: `Refactor ${codeRef} to improve readability, maintainability, and best practices. Show the full improved version.`,
+  };
+
+  const prompt = prompts[type];
+  if (!prompt) return;
+
+  document.getElementById('aiPromptInput').value = prompt;
+  // Expand AI panel if collapsed
+  if (state.aiPanelCollapsed) {
+    document.getElementById('collapseAiBtn').click();
+  }
+  generateCode();
+}
+
+// ============================================================================
+//  BREADCRUMBS
+// ============================================================================
+
+function updateBreadcrumbs(filePath) {
+  const bar = document.getElementById('breadcrumbBar');
+  if (!bar) return;
+  if (!filePath) { bar.innerHTML = ''; return; }
+
+  const sep   = filePath.includes('\\') ? '\\' : '/';
+  const parts = filePath.split(sep).filter(Boolean);
+  // On Windows, first part is "C:" — keep it
+
+  bar.innerHTML = parts.map((part, i) => {
+    const isLast = i === parts.length - 1;
+    return (i > 0 ? '<span class="crumb-sep">›</span>' : '') +
+      `<span class="crumb${isLast ? '' : ' crumb-link'}">${escHtml(part)}</span>`;
+  }).join('');
 }
